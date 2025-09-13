@@ -83,6 +83,8 @@ class PredictiveAnalyticsEngine:
         logger.setLevel(logging.INFO)
         
         if not logger.handlers:
+            # Ensure logs directory exists
+            Path('LOGS').mkdir(parents=True, exist_ok=True)
             handler = logging.FileHandler('LOGS/digital_twin_analytics.log')
             formatter = logging.Formatter(
                 '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -267,6 +269,71 @@ class PredictiveAnalyticsEngine:
             }
             
             self._save_model(model_name, model, scaler, metadata)
+            
+            result = {
+                'model_name': model_name,
+                'training_samples': len(features),
+                'anomaly_ratio': float(anomaly_ratio),
+                'feature_importance': dict(zip(features.columns, np.abs(anomaly_scores))),
+                'metadata': metadata
+            }
+            
+            self._set_cache(cache_key, result)
+            self.logger.info(f"Anomaly detector trained: {model_name}")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Anomaly detection training error: {e}")
+            raise
+    
+    def detect_anomalies(self, data: pd.DataFrame, model_name: str = "anomaly_detector", 
+                        threshold: float = None) -> Dict:
+        """
+        Detect anomalies in data using trained model.
+        
+        Args:
+            data: Data to analyze
+            model_name: Name of trained model
+            threshold: Custom threshold for anomaly detection
+            
+        Returns:
+            Anomaly detection results
+        """
+        try:
+            if model_name not in self.models:
+                raise ValueError(f"Model {model_name} not found")
+            
+            # Prepare data
+            features, _ = self.prepare_data(data)
+            
+            # Scale features using saved scaler
+            if model_name in self.scalers:
+                features_scaled = self.scalers[model_name].transform(features)
+            else:
+                features_scaled = features.values
+            
+            # Get model
+            model = self.models[model_name]
+            
+            # Make predictions
+            predictions = model.predict(features_scaled)
+            anomaly_scores = model.decision_function(features_scaled)
+            
+            # Apply custom threshold if provided
+            if threshold:
+                predictions = (anomaly_scores < threshold).astype(int)
+                predictions[predictions == 1] = -1  # Convert to anomaly format
+                predictions[predictions == 0] = 1
+            
+            # Identify anomalies
+            anomaly_indices = np.where(predictions == -1)[0]
+            anomalies = data.iloc[anomaly_indices].copy()
+            anomalies['anomaly_score'] = anomaly_scores[anomaly_indices]
+            
+            # Calculate statistics
+            anomaly_count = len(anomaly_indices)
+            anomaly_percentage = (anomaly_count / len(data)) * 100
             
             result = {
                 'anomaly_count': anomaly_count,
@@ -897,6 +964,99 @@ class PredictiveAnalyticsEngine:
             self.logger.error(f"Correlation analysis error: {e}")
             return {}
     
+    def optimization_analysis(self, data: pd.DataFrame, objective_column: str, 
+                            constraint_columns: List[str] = None) -> Dict:
+        """
+        Perform optimization analysis to find optimal parameter settings.
+        
+        Args:
+            data: Historical data
+            objective_column: Column to optimize (maximize or minimize)
+            constraint_columns: Columns representing constraints
+            
+        Returns:
+            Optimization analysis results
+        """
+        try:
+            features, target = self.prepare_data(data, objective_column)
+            
+            if constraint_columns:
+                constraint_data = features[constraint_columns]
+            else:
+                constraint_data = None
+            
+            # Train a model to understand the relationship
+            model = RandomForestRegressor(
+                n_estimators=100, 
+                random_state=42
+            )
+            model.fit(features, target)
+            
+            # Feature importance for optimization insights
+            feature_importance = dict(zip(features.columns, model.feature_importances_))
+            
+            # Find best performing cases
+            best_indices = target.nlargest(10).index
+            best_configs = features.loc[best_indices]
+            
+            # Statistical analysis of optimal ranges
+            optimization_ranges = {}
+            for column in features.columns:
+                optimization_ranges[column] = {
+                    'optimal_min': float(best_configs[column].min()),
+                    'optimal_max': float(best_configs[column].max()),
+                    'optimal_mean': float(best_configs[column].mean()),
+                    'current_range': [float(features[column].min()), float(features[column].max())]
+                }
+            
+            result = {
+                'objective_column': objective_column,
+                'best_performance': float(target.max()),
+                'worst_performance': float(target.min()),
+                'mean_performance': float(target.mean()),
+                'feature_importance': feature_importance,
+                'optimization_ranges': optimization_ranges,
+                'best_configurations': best_configs.to_dict('records'),
+                'recommendations': self._generate_optimization_recommendations(
+                    feature_importance, optimization_ranges
+                )
+            }
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Optimization analysis error: {e}")
+            raise
+    
+    def _generate_optimization_recommendations(self, feature_importance: Dict, 
+                                             optimization_ranges: Dict) -> List[Dict]:
+        """Generate optimization recommendations based on analysis."""
+        try:
+            recommendations = []
+            
+            # Sort features by importance
+            sorted_features = sorted(feature_importance.items(), 
+                                   key=lambda x: x[1], reverse=True)
+            
+            for feature, importance in sorted_features[:5]:  # Top 5 most important
+                if importance > 0.1:  # Significant importance threshold
+                    rec = {
+                        'parameter': feature,
+                        'importance': float(importance),
+                        'recommendation': f"Optimize {feature} within range "
+                                       f"[{optimization_ranges[feature]['optimal_min']:.3f}, "
+                                       f"{optimization_ranges[feature]['optimal_max']:.3f}]",
+                        'current_optimal_mean': optimization_ranges[feature]['optimal_mean'],
+                        'priority': 'high' if importance > 0.2 else 'medium'
+                    }
+                    recommendations.append(rec)
+            
+            return recommendations
+            
+        except Exception as e:
+            self.logger.error(f"Recommendation generation error: {e}")
+            return []
+    
     def get_model_info(self, model_name: str = None) -> Dict:
         """Get information about trained models."""
         try:
@@ -923,9 +1083,42 @@ class PredictiveAnalyticsEngine:
             self.logger.info("Analysis cache cleared")
         except Exception as e:
             self.logger.error(f"Cache clear error: {e}")
+    
+    def export_analysis_results(self, results: Dict, filename: str = None) -> str:
+        """Export analysis results to JSON file."""
+        try:
+            if filename is None:
+                filename = f"analysis_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
+            filepath = self.cache_path / filename
+            
+            with open(filepath, 'w') as f:
+                json.dump(results, f, indent=2, default=str)
+            
+            self.logger.info(f"Results exported to: {filepath}")
+            return str(filepath)
+            
+        except Exception as e:
+            self.logger.error(f"Export error: {e}")
+            raise
+    
+    def load_analysis_results(self, filename: str) -> Dict:
+        """Load analysis results from JSON file."""
+        try:
+            filepath = self.cache_path / filename
+            
+            with open(filepath, 'r') as f:
+                results = json.load(f)
+            
+            self.logger.info(f"Results loaded from: {filepath}")
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Load error: {e}")
+            raise
 
 
-# Example usage
+# Example usage and demonstration
 if __name__ == "__main__":
     # Initialize analytics engine
     analytics = PredictiveAnalyticsEngine()
@@ -962,6 +1155,16 @@ if __name__ == "__main__":
     pattern_result = analytics.pattern_recognition(sample_data[['temperature']], 'peaks')
     print(f"Pattern recognition completed. Found peaks in temperature data")
     
+    print("\nPerforming optimization analysis...")
+    sample_data['efficiency'] = (
+        100 - abs(sample_data['temperature'] - 22) * 2 
+        - abs(sample_data['pressure'] - 1013) * 0.01 
+        - sample_data['vibration'] * 50
+        + np.random.normal(0, 5, 1000)
+    )
+    opt_result = analytics.optimization_analysis(sample_data, 'efficiency')
+    print(f"Optimization analysis completed. Best performance: {opt_result['best_performance']:.2f}")
+    
     # Test prediction on new data
     print("\nTesting predictions on new data...")
     new_data = sample_data.tail(100)
@@ -972,69 +1175,21 @@ if __name__ == "__main__":
     failure_pred = analytics.predict_failure(new_data[['temperature', 'pressure', 'vibration']])
     print(f"Failure prediction: {failure_pred['high_risk_count']} high-risk cases")
     
-    print("\nAnalytics engine demonstration completed!")
-                'model_name': model_name,
-                'training_samples': len(features),
-                'anomaly_ratio': anomaly_ratio,
-                'feature_importance': dict(zip(features.columns, np.abs(anomaly_scores).mean())),
-                'metadata': metadata
-            }
-            
-            self._set_cache(cache_key, result)
-            self.logger.info(f"Anomaly detector trained: {model_name}")
-            
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Anomaly detection training error: {e}")
-            raise
+    # Export results
+    all_results = {
+        'anomaly_training': anomaly_result,
+        'failure_training': failure_result,
+        'time_series': ts_result,
+        'clustering': cluster_result,
+        'patterns': pattern_result,
+        'optimization': opt_result,
+        'predictions': {
+            'anomalies': anomaly_pred,
+            'failures': failure_pred
+        }
+    }
     
-    def detect_anomalies(self, data: pd.DataFrame, model_name: str = "anomaly_detector", 
-                        threshold: float = None) -> Dict:
-        """
-        Detect anomalies in data using trained model.
-        
-        Args:
-            data: Data to analyze
-            model_name: Name of trained model
-            threshold: Custom threshold for anomaly detection
-            
-        Returns:
-            Anomaly detection results
-        """
-        try:
-            if model_name not in self.models:
-                raise ValueError(f"Model {model_name} not found")
-            
-            # Prepare data
-            features, _ = self.prepare_data(data)
-            
-            # Scale features using saved scaler
-            if model_name in self.scalers:
-                features_scaled = self.scalers[model_name].transform(features)
-            else:
-                features_scaled = features.values
-            
-            # Get model
-            model = self.models[model_name]
-            
-            # Make predictions
-            predictions = model.predict(features_scaled)
-            anomaly_scores = model.decision_function(features_scaled)
-            
-            # Apply custom threshold if provided
-            if threshold:
-                predictions = (anomaly_scores < threshold).astype(int)
-                predictions[predictions == 1] = -1  # Convert to anomaly format
-                predictions[predictions == 0] = 1
-            
-            # Identify anomalies
-            anomaly_indices = np.where(predictions == -1)[0]
-            anomalies = data.iloc[anomaly_indices].copy()
-            anomalies['anomaly_score'] = anomaly_scores[anomaly_indices]
-            
-            # Calculate statistics
-            anomaly_count = len(anomaly_indices)
-            anomaly_percentage = (anomaly_count / len(data)) * 100
-            
-            result = {
+    export_path = analytics.export_analysis_results(all_results)
+    print(f"\nAll results exported to: {export_path}")
+    
+    print("\nAnalytics engine demonstration completed!")
