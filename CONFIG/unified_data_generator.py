@@ -128,6 +128,7 @@ class UnifiedDataGenerator:
             time_points = pd.date_range(start_time, end_time, freq=f'{interval_minutes}min')
             
             # Generate devices
+            start_time = datetime.now()
             devices = self._generate_device_metadata(device_count)
             
             # Generate data for each device and time point
