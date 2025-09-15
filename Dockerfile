@@ -1,5 +1,9 @@
 # Multi-stage build for optimized production image
-FROM python:3.9-slim as builder
+
+# ----------------------
+# Builder stage
+# ----------------------
+FROM python:3.12-slim AS builder
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -23,8 +27,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --user --no-cache-dir -r requirements.txt
 
+# ----------------------
 # Production stage
-FROM python:3.9-slim as production
+# ----------------------
+FROM python:3.12-slim AS production
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -34,8 +40,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=5000
 
 # Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
+RUN apt-get update && apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
